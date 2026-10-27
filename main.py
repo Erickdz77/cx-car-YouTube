@@ -19,6 +19,8 @@ VOZ = "pt-BR-AntonioNeural"
 CHAMADA = ("Gostou? Deixa o like, comenta o que achou e compartilha "
            "com quem ama carros. Eu sou o CX Car YT, até a próxima!")
 VOLUME_MUSICA = 0.12  # 12%; aumente ou diminua se precisar
+LOGO_LARGURA = 150    # largura da logo em pixels (o vídeo tem 1080)
+LOGO_MARGEM = 120     # distância da logo até a borda de baixo
 
 SAIDA = pathlib.Path("saida")
 TMP = pathlib.Path("tmp")
@@ -284,20 +286,39 @@ def main():
     estilo = ("FontName=DejaVu Sans,Bold=1,FontSize=11,Alignment=2,MarginV=70,"
               "Outline=3,PrimaryColour=&H00FFFFFF")
 
+    logo = pathlib.Path("logo.png")
     musicas = sorted(pathlib.Path("musicas").glob("*.mp3"))
     cmd = ["ffmpeg", "-y", "-loglevel", "error",
            "-i", str(fundo), "-i", str(audio)]
+    proximo = 2
+    idx_musica = idx_logo = None
     if musicas:
         musica = random.choice(musicas)
         print("Música:", musica.name)
         cmd += ["-stream_loop", "-1", "-i", str(musica)]
-        mix = (f"[1:a]volume=1.0[v];[2:a]volume={VOLUME_MUSICA}[m];"
-               "[v][m]amix=inputs=2:duration=first:normalize=0,"
-               f"afade=t=out:st={max(dur - 2, 0):.2f}:d=2[a]")
-        cmd += ["-filter_complex", mix, "-map", "0:v", "-map", "[a]"]
+        idx_musica = proximo
+        proximo += 1
+    if logo.exists():
+        cmd += ["-i", str(logo)]
+        idx_logo = proximo
+        proximo += 1
+
+    partes = [f"[0:v]subtitles=legenda.srt:force_style='{estilo}'[sv]"]
+    if idx_logo is not None:
+        partes.append(f"[{idx_logo}:v]scale={LOGO_LARGURA}:-1[lg]")
+        partes.append(f"[sv][lg]overlay=(W-w)/2:H-h-{LOGO_MARGEM}[vout]")
     else:
-        cmd += ["-map", "0:v", "-map", "1:a"]
-    cmd += ["-vf", f"subtitles=legenda.srt:force_style='{estilo}'",
+        partes.append("[sv]null[vout]")
+    if idx_musica is not None:
+        partes.append(
+            f"[1:a]volume=1.0[v];[{idx_musica}:a]volume={VOLUME_MUSICA}[m];"
+            "[v][m]amix=inputs=2:duration=first:normalize=0,"
+            f"afade=t=out:st={max(dur - 2, 0):.2f}:d=2[aout]")
+        mapa_audio = "[aout]"
+    else:
+        mapa_audio = "1:a"
+    cmd += ["-filter_complex", ";".join(partes),
+            "-map", "[vout]", "-map", mapa_audio,
             "-t", f"{dur:.2f}", "-c:v", "libx264", "-preset", "veryfast",
             "-crf", "23", "-c:a", "aac", "-b:a", "160k", str(final)]
     subprocess.run(cmd, check=True)
