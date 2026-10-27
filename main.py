@@ -11,7 +11,7 @@ import edge_tts
 import requests
 
 GEMINI_KEY = os.environ["GEMINI_API_KEY"]
-PEXELS_KEY = os.environ["PEXELS_API_KEY"]
+PIXABAY_KEY = os.environ["PIXABAY_API_KEY"]
 MODELO = "gemini-flash-latest"  # se der erro de modelo, troque por outro nome
 VOZ = "pt-BR-AntonioNeural"
 
@@ -139,24 +139,29 @@ def duracao(caminho):
 
 
 def baixar_videos(termos, marca):
-    """Busca vídeos no Pexels e filtra pelos que têm a marca no nome."""
-    marca = marca.lower().replace(" ", "-")
-    h = {"Authorization": PEXELS_KEY}
+    """Busca vídeos no Pixabay e filtra pelos que citam a marca nas tags."""
+    marca = marca.lower()
+    marca_url = marca.replace(" ", "-")
     vistos, certos, genericos = set(), [], []
     for termo in termos + [f"{marca} car"]:
         r = requests.get(
-            "https://api.pexels.com/videos/search",
-            headers=h,
-            params={"query": termo, "per_page": 15},
+            "https://pixabay.com/api/videos/",
+            params={"key": PIXABAY_KEY, "q": termo[:100], "per_page": 20,
+                    "safesearch": "true"},
             timeout=60,
         )
         if r.status_code != 200:
+            print("Pixabay erro:", r.status_code)
             continue
-        for v in r.json().get("videos", []):
+        for v in r.json().get("hits", []):
             if v["id"] in vistos:
                 continue
             vistos.add(v["id"])
-            (certos if marca in v["url"].lower() else genericos).append(v)
+            texto = (v.get("tags", "") + " " + v.get("pageURL", "")).lower()
+            if marca in texto or marca_url in texto:
+                certos.append(v)
+            else:
+                genericos.append(v)
     escolhidos = certos[:8]
     if len(escolhidos) < 4:  # plano B: completa com vídeos genéricos
         escolhidos += genericos[: 6 - len(escolhidos)]
@@ -164,12 +169,12 @@ def baixar_videos(termos, marca):
 
     arquivos = []
     for v in escolhidos:
-        arqs = [f for f in v["video_files"] if f.get("file_type") == "video/mp4"]
-        if not arqs:
+        opcoes = v.get("videos", {})
+        info = opcoes.get("medium") or opcoes.get("large") or opcoes.get("small")
+        if not info or not info.get("url"):
             continue
-        arqs.sort(key=lambda f: abs((f.get("height") or 0) - 1280))
         destino = TMP / f"bruto_{v['id']}.mp4"
-        with requests.get(arqs[0]["link"], stream=True, timeout=120) as r:
+        with requests.get(info["url"], stream=True, timeout=120) as r:
             with open(destino, "wb") as f:
                 for pedaco in r.iter_content(1 << 20):
                     f.write(pedaco)
@@ -245,7 +250,7 @@ def main():
 
     brutos = baixar_videos(roteiro["termos_busca"], tema["marca"])
     if not brutos:
-        raise SystemExit("Nenhum vídeo encontrado no Pexels.")
+        raise SystemExit("Nenhum vídeo encontrado no Pixabay.")
     fundo = montar_fundo(brutos, dur)
 
     gerar_legenda(narracao, dur, pathlib.Path("legenda.srt"))
@@ -264,7 +269,8 @@ def main():
 
     (SAIDA / f"{nome}.json").write_text(
         json.dumps(
-            {"titulo": roteiro["titulo"], "descricao": narracao,
+            {"titulo": roteiro["titulo"],
+             "descricao": narracao + "\n\nVídeos: Pixabay",
              "hashtags": "#carros #shorts #curiosidades"},
             ensure_ascii=False, indent=2),
         encoding="utf-8",
