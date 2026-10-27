@@ -16,6 +16,9 @@ PIXABAY_KEY = os.environ["PIXABAY_API_KEY"]
 MODELO = "gemini-flash-latest"
 MODELOS_RESERVA = ["gemini-3.8-flash", "gemini-3.5-flash-lite"]
 VOZ = "pt-BR-AntonioNeural"
+CHAMADA = ("Gostou? Deixa o like, comenta o que achou e compartilha "
+           "com quem ama carros. Eu sou o CX Car YT, até a próxima!")
+VOLUME_MUSICA = 0.12  # 12%; aumente ou diminua se precisar
 
 SAIDA = pathlib.Path("saida")
 TMP = pathlib.Path("tmp")
@@ -134,7 +137,7 @@ Estrutura obrigatória:
 3. Final que fecha a história ou deixa uma pergunta curiosa.
 
 Narração entre 110 e 140 palavras, frases curtas, tom empolgado e natural, sem emojis,
-sem "olá pessoal" e sem pedir para curtir ou seguir.
+sem "olá pessoal" e sem pedir para curtir ou seguir (a chamada final é adicionada depois).
 
 TEXTO-FONTE:
 {fonte}
@@ -262,10 +265,12 @@ def main():
         raise SystemExit("Fonte fraca na Wikipédia; rode de novo para sortear outro tema.")
 
     roteiro = escrever_roteiro(tema, fonte)
-    narracao = re.sub(r"\s+", " ", roteiro["narracao"]).strip()
+    texto_roteiro = re.sub(r"\s+", " ", roteiro["narracao"]).strip()
+    narracao = texto_roteiro + " " + CHAMADA
 
     audio = TMP / "voz.mp3"
-    asyncio.run(_tts(narracao, audio))
+    voz_texto = narracao.replace("CX Car YT", "Cê Xis Car Uai Tê")
+    asyncio.run(_tts(voz_texto, audio))
     dur = duracao(audio)
 
     brutos = baixar_videos(roteiro["termos_busca"], tema["marca"])
@@ -278,19 +283,29 @@ def main():
     final = SAIDA / f"{nome}.mp4"
     estilo = ("FontName=DejaVu Sans,Bold=1,FontSize=11,Alignment=2,MarginV=70,"
               "Outline=3,PrimaryColour=&H00FFFFFF")
-    subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error", "-i", str(fundo), "-i", str(audio),
-         "-vf", f"subtitles=legenda.srt:force_style='{estilo}'",
-         "-map", "0:v", "-map", "1:a", "-t", f"{dur:.2f}",
-         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-         "-c:a", "aac", "-b:a", "160k", str(final)],
-        check=True,
-    )
+
+    musicas = sorted(pathlib.Path("musicas").glob("*.mp3"))
+    cmd = ["ffmpeg", "-y", "-loglevel", "error",
+           "-i", str(fundo), "-i", str(audio)]
+    if musicas:
+        musica = random.choice(musicas)
+        print("Música:", musica.name)
+        cmd += ["-stream_loop", "-1", "-i", str(musica)]
+        mix = (f"[1:a]volume=1.0[v];[2:a]volume={VOLUME_MUSICA}[m];"
+               "[v][m]amix=inputs=2:duration=first:normalize=0,"
+               f"afade=t=out:st={max(dur - 2, 0):.2f}:d=2[a]")
+        cmd += ["-filter_complex", mix, "-map", "0:v", "-map", "[a]"]
+    else:
+        cmd += ["-map", "0:v", "-map", "1:a"]
+    cmd += ["-vf", f"subtitles=legenda.srt:force_style='{estilo}'",
+            "-t", f"{dur:.2f}", "-c:v", "libx264", "-preset", "veryfast",
+            "-crf", "23", "-c:a", "aac", "-b:a", "160k", str(final)]
+    subprocess.run(cmd, check=True)
 
     (SAIDA / f"{nome}.json").write_text(
         json.dumps(
             {"titulo": roteiro["titulo"],
-             "descricao": narracao + "\n\nVídeos: Pixabay",
+             "descricao": texto_roteiro + "\n\nVídeos: Pixabay",
              "hashtags": "#carros #shorts #curiosidades"},
             ensure_ascii=False, indent=2),
         encoding="utf-8",
