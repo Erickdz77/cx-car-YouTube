@@ -14,7 +14,7 @@ import requests
 GEMINI_KEY = os.environ["GEMINI_API_KEY"]
 PIXABAY_KEY = os.environ["PIXABAY_API_KEY"]
 MODELO = "gemini-flash-latest"
-MODELOS_RESERVA = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
+MODELOS_RESERVA = ["gemini-3.8-flash", "gemini-3.5-flash-lite"]
 VOZ = "pt-BR-AntonioNeural"
 
 SAIDA = pathlib.Path("saida")
