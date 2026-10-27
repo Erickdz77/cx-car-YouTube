@@ -19,6 +19,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Instalar ffmpeg e fonte
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-dejavu-core
+
       - name: Instalar dependencias
         run: pip install requests edge-tts
 
