@@ -6,13 +6,15 @@ import pathlib
 import random
 import re
 import subprocess
+import time
 
 import edge_tts
 import requests
 
 GEMINI_KEY = os.environ["GEMINI_API_KEY"]
 PIXABAY_KEY = os.environ["PIXABAY_API_KEY"]
-MODELO = "gemini-flash-latest"  # se der erro de modelo, troque por outro nome
+MODELO = "gemini-flash-latest"
+MODELOS_RESERVA = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
 VOZ = "pt-BR-AntonioNeural"
 
 SAIDA = pathlib.Path("saida")
@@ -49,15 +51,33 @@ def carregar_historico():
 
 
 def gemini(prompt, json_mode=False):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODELO}:generateContent"
+    """Chama o Gemini com novas tentativas e modelos reserva."""
     corpo = {"contents": [{"parts": [{"text": prompt}]}]}
     if json_mode:
         corpo["generationConfig"] = {"responseMimeType": "application/json"}
-    r = requests.post(
-        url, headers={"x-goog-api-key": GEMINI_KEY}, json=corpo, timeout=180
-    )
-    r.raise_for_status()
-    return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+    ultimo_erro = None
+    for modelo in [MODELO] + MODELOS_RESERVA:
+        url = ("https://generativelanguage.googleapis.com/v1beta/models/"
+               f"{modelo}:generateContent")
+        for tentativa in range(4):
+            try:
+                r = requests.post(
+                    url, headers={"x-goog-api-key": GEMINI_KEY},
+                    json=corpo, timeout=180,
+                )
+            except requests.RequestException as e:
+                ultimo_erro = str(e)
+                time.sleep(5 * (tentativa + 1))
+                continue
+            if r.status_code == 200:
+                return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+            ultimo_erro = f"{r.status_code}: {r.text[:200]}"
+            print("Gemini erro", modelo, ultimo_erro)
+            if r.status_code in (429, 500, 502, 503, 504):
+                time.sleep(10 * (tentativa + 1))
+                continue
+            break
+    raise SystemExit(f"Gemini falhou: {ultimo_erro}")
 
 
 def escolher_tema(historico):
