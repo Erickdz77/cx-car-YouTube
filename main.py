@@ -98,30 +98,57 @@ Responda só em JSON:
     return json.loads(gemini(prompt, json_mode=True))
 
 
+def _get_wikipedia(lang, params):
+    """Faz o pedido à Wikipédia com identificação, novas tentativas e checagem."""
+    api = f"https://{lang}.wikipedia.org/w/api.php"
+    cabecalho = {
+        "User-Agent": ("CXCarYTBot/1.0 "
+                       "(https://github.com/Erickdz77/cx-car-YouTube; "
+                       "bot de curiosidades sobre carros)"),
+        "Accept": "application/json",
+    }
+    for tentativa in range(3):
+        try:
+            r = requests.get(api, headers=cabecalho, params=params, timeout=60)
+        except requests.RequestException as e:
+            print("Wikipédia erro de rede:", e)
+            time.sleep(3 * (tentativa + 1))
+            continue
+        if r.status_code == 200:
+            try:
+                return r.json()
+            except ValueError:
+                print("Wikipédia respondeu algo que não é JSON:", r.text[:150])
+        else:
+            print("Wikipédia erro", r.status_code, r.text[:150])
+        time.sleep(3 * (tentativa + 1))
+    return None
+
+
 def pesquisar_wikipedia(busca):
-    api = "https://pt.wikipedia.org/w/api.php"
-    h = {"User-Agent": "carros-shorts-bot/1.0"}
-    r = requests.get(
-        api,
-        headers=h,
-        params={"action": "query", "list": "search", "srsearch": busca,
-                "srlimit": 1, "format": "json"},
-        timeout=60,
-    )
-    achados = r.json()["query"]["search"]
-    if not achados:
-        return ""
-    titulo = achados[0]["title"]
-    r = requests.get(
-        api,
-        headers=h,
-        params={"action": "query", "prop": "extracts", "explaintext": 1,
-                "titles": titulo, "redirects": 1, "format": "json"},
-        timeout=60,
-    )
-    paginas = r.json()["query"]["pages"]
-    texto = next(iter(paginas.values())).get("extract", "")
-    return texto[:7000]
+    """Procura o artigo em português; se falhar, tenta em inglês."""
+    for lang in ("pt", "en"):
+        dados = _get_wikipedia(lang, {
+            "action": "query", "list": "search", "srsearch": busca,
+            "srlimit": 1, "format": "json",
+        })
+        if not dados:
+            continue
+        achados = dados.get("query", {}).get("search", [])
+        if not achados:
+            continue
+        dados = _get_wikipedia(lang, {
+            "action": "query", "prop": "extracts", "explaintext": 1,
+            "redirects": 1, "titles": achados[0]["title"], "format": "json",
+        })
+        if not dados:
+            continue
+        paginas = dados.get("query", {}).get("pages", {})
+        texto = next(iter(paginas.values()), {}).get("extract", "")
+        if len(texto) >= 500:
+            print(f"Fonte: Wikipédia ({lang}), {len(texto)} caracteres")
+            return texto[:7000]
+    return ""
 
 
 def escrever_roteiro(tema, fonte):
@@ -130,8 +157,10 @@ def escrever_roteiro(tema, fonte):
 Tema: {tema['tema']} ({tema['carro']})
 Formato: {formato}
 
-Use SOMENTE fatos presentes no texto-fonte abaixo. Não invente datas, números ou nomes.
-Se a fonte não trouxer um detalhe, não o mencione.
+Use SOMENTE fatos presentes no texto-fonte abaixo (que pode estar em português
+ou inglês). Escreva a narração sempre em português do Brasil.
+Não invente datas, números ou nomes. Se a fonte não trouxer um detalhe,
+não o mencione.
 
 Estrutura obrigatória:
 1. Gancho forte nos primeiros 3 segundos (uma frase que gera curiosidade).
