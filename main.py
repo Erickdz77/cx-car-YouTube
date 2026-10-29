@@ -51,10 +51,19 @@ FORMATOS = [
 
 def carregar_historico():
     if HISTORICO.exists():
-        return json.loads(HISTORICO.read_text(encoding="utf-8"))
+        try:
+            return json.loads(HISTORICO.read_text(encoding="utf-8"))
+        except ValueError:
+            print("historico.json ilegível; começando do zero.")
     return []
 
 
+def limpar(texto):
+    """Remove símbolos que o YouTube não aceita em título e descrição."""
+    return re.sub(r"[<>]", "", texto).strip()
+
+
+# ---------------------------------------------------------------- Gemini
 def gemini(prompt, json_mode=False):
     """Chama o Gemini com novas tentativas e modelos reserva."""
     corpo = {"contents": [{"parts": [{"text": prompt}]}]}
@@ -75,7 +84,13 @@ def gemini(prompt, json_mode=False):
                 time.sleep(5 * (tentativa + 1))
                 continue
             if r.status_code == 200:
-                return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                try:
+                    return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                except (KeyError, IndexError, ValueError):
+                    ultimo_erro = "resposta vazia ou bloqueada"
+                    print("Gemini:", ultimo_erro, modelo)
+                    time.sleep(5)
+                    continue
             ultimo_erro = f"{r.status_code}: {r.text[:200]}"
             print("Gemini erro", modelo, ultimo_erro)
             if r.status_code in (429, 500, 502, 503, 504):
@@ -85,21 +100,50 @@ def gemini(prompt, json_mode=False):
     raise SystemExit(f"Gemini falhou: {ultimo_erro}")
 
 
-def escolher_tema(historico):
+def ler_json(texto):
+    texto = texto.strip()
+    texto = re.sub(r"^```(?:json)?|```$", "", texto, flags=re.MULTILINE).strip()
+    ini, fim = texto.find("{"), texto.rfind("}")
+    if ini != -1 and fim != -1:
+        texto = texto[ini:fim + 1]
+    return json.loads(texto)
+
+
+def gemini_json(prompt, validar):
+    for _ in range(3):
+        texto = gemini(prompt, json_mode=True)
+        try:
+            dados = ler_json(texto)
+            if isinstance(dados, dict) and validar(dados):
+                return dados
+        except ValueError:
+            pass
+        print("Resposta do Gemini fora do formato; tentando de novo.")
+    raise SystemExit("O Gemini não devolveu o formato esperado.")
+
+
+def escolher_tema(lista_usados):
     categoria = random.choice(CATEGORIAS)
-    usados = [h["tema"] for h in historico][-80:]
+    usados = [h["tema"] for h in lista_usados][-80:]
     prompt = f"""Sugira UMA história REAL e interessante do mundo dos carros, na categoria: {categoria}.
 Regras:
-- Deve girar em torno de um carro ou marca específica.
+- Deve girar em torno de um carro ou marca específica, e ter acontecido de verdade.
 - Deve existir artigo sobre ela na Wikipédia em português.
 - NÃO repita nem chegue perto destes temas já usados: {usados}
 Responda só em JSON:
 {{"tema": "frase curta do tema", "marca": "só a marca, ex: Ferrari", "carro": "marca e modelo, ex: Ferrari F40", "busca_wikipedia": "termos para achar o artigo"}}"""
-    return json.loads(gemini(prompt, json_mode=True))
+    tema = gemini_json(
+        prompt,
+        lambda d: all(d.get(k) for k in
+                      ("tema", "marca", "carro", "busca_wikipedia")),
+    )
+    return {k: str(tema[k]) for k in
+            ("tema", "marca", "carro", "busca_wikipedia")}
 
 
+# ------------------------------------------------------------- Wikipédia
 def _get_wikipedia(lang, params):
-    """Faz o pedido à Wikipédia com identificação, novas tentativas e checagem."""
+    """Pedido à Wikipédia com identificação, novas tentativas e checagem."""
     api = f"https://{lang}.wikipedia.org/w/api.php"
     cabecalho = {
         "User-Agent": ("CXCarYTBot/1.0 "
@@ -125,32 +169,33 @@ def _get_wikipedia(lang, params):
     return None
 
 
-def pesquisar_wikipedia(busca):
-    """Procura o artigo em português; se falhar, tenta em inglês."""
+def pesquisar_wikipedia(busca, marca):
+    """Acha um artigo que cite a marca. Tenta em português e depois em inglês."""
+    marca_min = marca.lower().split()[0]
     for lang in ("pt", "en"):
         dados = _get_wikipedia(lang, {
             "action": "query", "list": "search", "srsearch": busca,
-            "srlimit": 1, "format": "json",
+            "srlimit": 3, "format": "json",
         })
         if not dados:
             continue
-        achados = dados.get("query", {}).get("search", [])
-        if not achados:
-            continue
-        dados = _get_wikipedia(lang, {
-            "action": "query", "prop": "extracts", "explaintext": 1,
-            "redirects": 1, "titles": achados[0]["title"], "format": "json",
-        })
-        if not dados:
-            continue
-        paginas = dados.get("query", {}).get("pages", {})
-        texto = next(iter(paginas.values()), {}).get("extract", "")
-        if len(texto) >= 500:
-            print(f"Fonte: Wikipédia ({lang}), {len(texto)} caracteres")
-            return texto[:7000]
+        for achado in dados.get("query", {}).get("search", []):
+            dados2 = _get_wikipedia(lang, {
+                "action": "query", "prop": "extracts", "explaintext": 1,
+                "redirects": 1, "titles": achado["title"], "format": "json",
+            })
+            if not dados2:
+                continue
+            paginas = dados2.get("query", {}).get("pages", {})
+            texto = next(iter(paginas.values()), {}).get("extract", "")
+            if len(texto) >= 500 and marca_min in texto.lower():
+                print(f"Fonte: Wikipédia ({lang}), {achado['title']}, "
+                      f"{len(texto)} caracteres")
+                return texto[:7000]
     return ""
 
 
+# --------------------------------------------------------------- Roteiro
 def escrever_roteiro(tema, fonte):
     formato = random.choice(FORMATOS)
     prompt = f"""Você é roteirista de vídeos curtos virais sobre carros, em português do Brasil.
@@ -161,6 +206,9 @@ Use SOMENTE fatos presentes no texto-fonte abaixo (que pode estar em português
 ou inglês). Escreva a narração sempre em português do Brasil.
 Não invente datas, números ou nomes. Se a fonte não trouxer um detalhe,
 não o mencione.
+
+Se o texto-fonte NÃO confirmar claramente a história do tema, responda apenas:
+{{"erro": "fonte nao confirma"}}
 
 Estrutura obrigatória:
 1. Gancho forte nos primeiros 3 segundos (uma frase que gera curiosidade).
@@ -177,11 +225,46 @@ Responda só em JSON:
 {{"titulo": "título curto e chamativo, até 70 caracteres",
   "narracao": "texto completo da narração",
   "termos_busca": ["3 a 4 termos em inglês para buscar vídeos do carro, ex: ferrari f40 driving"]}}"""
-    return json.loads(gemini(prompt, json_mode=True))
+    return gemini_json(
+        prompt,
+        lambda d: d.get("erro") or (d.get("narracao") and d.get("titulo")),
+    )
 
 
+def preparar_roteiro(historico):
+    """Tenta até 4 temas até achar um com fonte confiável."""
+    tentados = list(historico)
+    for _ in range(4):
+        tema = escolher_tema(tentados)
+        tentados.append({"tema": tema["tema"]})
+        print("Tema:", tema["tema"])
+        fonte = pesquisar_wikipedia(tema["busca_wikipedia"], tema["marca"])
+        if not fonte:
+            print("Sem fonte confiável; tentando outro tema.")
+            continue
+        roteiro = escrever_roteiro(tema, fonte)
+        if roteiro.get("erro") or not roteiro.get("narracao"):
+            print("A fonte não confirma o tema; tentando outro.")
+            continue
+        return tema, roteiro
+    raise SystemExit("Não achei um tema com fonte confiável. Rode de novo.")
+
+
+# ------------------------------------------------------------ Voz e vídeo
 async def _tts(texto, caminho):
     await edge_tts.Communicate(texto, VOZ, rate="+8%").save(str(caminho))
+
+
+def gerar_voz(texto, caminho):
+    for tentativa in range(4):
+        try:
+            asyncio.run(_tts(texto, caminho))
+            if caminho.exists() and caminho.stat().st_size > 1000:
+                return
+        except Exception as e:
+            print("Erro na voz:", e)
+        time.sleep(5 * (tentativa + 1))
+    raise SystemExit("Não consegui gerar a voz (edge-tts).")
 
 
 def duracao(caminho):
@@ -198,16 +281,21 @@ def baixar_videos(termos, marca):
     marca_url = marca.replace(" ", "-")
     vistos, certos, genericos = set(), [], []
     for termo in termos + [f"{marca} car"]:
-        r = requests.get(
-            "https://pixabay.com/api/videos/",
-            params={"key": PIXABAY_KEY, "q": termo[:100], "per_page": 20,
-                    "safesearch": "true"},
-            timeout=60,
-        )
-        if r.status_code != 200:
-            print("Pixabay erro:", r.status_code)
+        try:
+            r = requests.get(
+                "https://pixabay.com/api/videos/",
+                params={"key": PIXABAY_KEY, "q": termo[:100], "per_page": 20,
+                        "safesearch": "true"},
+                timeout=60,
+            )
+            if r.status_code != 200:
+                print("Pixabay erro:", r.status_code)
+                continue
+            hits = r.json().get("hits", [])
+        except (requests.RequestException, ValueError) as e:
+            print("Pixabay erro:", e)
             continue
-        for v in r.json().get("hits", []):
+        for v in hits:
             if v["id"] in vistos:
                 continue
             vistos.add(v["id"])
@@ -228,32 +316,44 @@ def baixar_videos(termos, marca):
         if not info or not info.get("url"):
             continue
         destino = TMP / f"bruto_{v['id']}.mp4"
-        with requests.get(info["url"], stream=True, timeout=120) as r:
-            with open(destino, "wb") as f:
-                for pedaco in r.iter_content(1 << 20):
-                    f.write(pedaco)
-        arquivos.append(destino)
+        try:
+            with requests.get(info["url"], stream=True, timeout=120) as r:
+                r.raise_for_status()
+                with open(destino, "wb") as f:
+                    for pedaco in r.iter_content(1 << 20):
+                        f.write(pedaco)
+            arquivos.append(destino)
+        except requests.RequestException as e:
+            print("Falha ao baixar um vídeo, ignorando:", e)
     return arquivos
 
 
 def montar_fundo(arquivos, dur_total):
     """Corta e padroniza os clipes em 9:16 até cobrir a duração da narração."""
-    random.shuffle(arquivos)
+    usaveis = list(arquivos)
+    random.shuffle(usaveis)
     segmentos, soma, i = [], 0.0, 0
-    while soma < dur_total + 1 and i < 60:
-        origem = arquivos[i % len(arquivos)]
+    while soma < dur_total + 1 and i < 120 and usaveis:
+        origem = usaveis[i % len(usaveis)]
         seg = TMP / f"seg_{i}.mp4"
-        subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-t", "4", "-i", str(origem),
-             "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,"
-                    "crop=1080:1920,fps=30,setsar=1",
-             "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-             str(seg)],
-            check=True,
-        )
-        soma += duracao(seg)
-        segmentos.append(seg)
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error", "-t", "4",
+                 "-i", str(origem),
+                 "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,"
+                        "crop=1080:1920,fps=30,setsar=1",
+                 "-an", "-c:v", "libx264", "-preset", "veryfast",
+                 "-crf", "23", str(seg)],
+                check=True,
+            )
+            soma += duracao(seg)
+            segmentos.append(seg)
+        except (subprocess.CalledProcessError, ValueError):
+            print("Clipe com problema, ignorando:", origem.name)
+            usaveis.remove(origem)
         i += 1
+    if not segmentos:
+        raise SystemExit("Nenhum clipe de vídeo utilizável.")
     lista = TMP / "lista.txt"
     lista.write_text("".join(f"file '{s.name}'\n" for s in segmentos))
     fundo = TMP / "fundo.mp4"
@@ -286,31 +386,32 @@ def gerar_legenda(texto, dur, caminho):
     caminho.write_text("\n".join(linhas), encoding="utf-8")
 
 
+# ------------------------------------------------------------------ Main
 def main():
     historico = carregar_historico()
-    tema = escolher_tema(historico)
-    print("Tema:", tema["tema"])
+    tema, roteiro = preparar_roteiro(historico)
 
-    fonte = pesquisar_wikipedia(tema["busca_wikipedia"])
-    if len(fonte) < 500:
-        raise SystemExit("Fonte fraca na Wikipédia; rode de novo para sortear outro tema.")
-
-    roteiro = escrever_roteiro(tema, fonte)
-    texto_roteiro = re.sub(r"\s+", " ", roteiro["narracao"]).strip()
+    texto_roteiro = re.sub(r"\s+", " ", str(roteiro["narracao"])).strip()
     narracao = texto_roteiro + " " + CHAMADA
 
     audio = TMP / "voz.mp3"
     voz_texto = narracao.replace("CX Car YT", "Cê Xis Car Uai Tê")
-    asyncio.run(_tts(voz_texto, audio))
+    gerar_voz(voz_texto, audio)
     dur = duracao(audio)
 
-    brutos = baixar_videos(roteiro["termos_busca"], tema["marca"])
+    termos = roteiro.get("termos_busca") or []
+    if isinstance(termos, str):
+        termos = [termos]
+    termos = [str(t) for t in termos][:4] or [tema["carro"]]
+
+    brutos = baixar_videos(termos, tema["marca"])
     if not brutos:
         raise SystemExit("Nenhum vídeo encontrado no Pixabay.")
     fundo = montar_fundo(brutos, dur)
 
     gerar_legenda(narracao, dur, pathlib.Path("legenda.srt"))
-    nome = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M")
+    agora = datetime.datetime.now(datetime.timezone.utc)
+    nome = agora.strftime("%Y%m%d_%H%M")
     final = SAIDA / f"{nome}.mp4"
     estilo = ("FontName=DejaVu Sans,Bold=1,FontSize=11,Alignment=2,MarginV=70,"
               "Outline=3,PrimaryColour=&H00FFFFFF")
@@ -354,8 +455,8 @@ def main():
 
     (SAIDA / f"{nome}.json").write_text(
         json.dumps(
-            {"titulo": roteiro["titulo"],
-             "descricao": texto_roteiro + "\n\nVídeos: Pixabay",
+            {"titulo": limpar(str(roteiro["titulo"]))[:95],
+             "descricao": limpar(texto_roteiro) + "\n\nVídeos: Pixabay",
              "hashtags": "#carros #shorts #curiosidades"},
             ensure_ascii=False, indent=2),
         encoding="utf-8",
