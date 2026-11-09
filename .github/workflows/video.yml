@@ -2,11 +2,18 @@ name: Gerar video de carros
 
 on:
   schedule:
-    - cron: "0 14 * * *"
+    # Horários em UTC (Brasília = UTC-3).
+    # O bot começa 30 min antes, porque gerar o vídeo leva um tempo.
+    - cron: "30 11 * * *"   # posta por volta das 9h
+    - cron: "30 14 * * *"   # posta por volta das 12h
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: gerar-video
+  cancel-in-progress: false
 
 jobs:
   gerar:
@@ -31,7 +38,7 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
-        run: python main.py
+        run: python -u main.py
 
       - name: Guardar video para download
         uses: actions/upload-artifact@v4
